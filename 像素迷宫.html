@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Cyber Pixel Maze</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #020205;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        #game-container {
+            position: relative;
+            width: 400px;
+            height: 600px;
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.3),
+                        0 0 10px rgba(255, 0, 255, 0.3);
+            border: 2px solid #333;
+        }
+        canvas {
+            display: block;
+            background-color: #050510;
+            image-rendering: pixelated;
+            width: 100%;
+            height: 100%;
+        }
+        .scanlines {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(
+                to bottom,
+                rgba(255,255,255,0) 50%,
+                rgba(0,0,0,0.2) 50%
+            );
+            background-size: 100% 4px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #0ff;
+            font-size: 14px;
+            text-shadow: 1px 1px 0 #f0f;
+            pointer-events: none;
+            z-index: 20;
+        }
+        #start-screen {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            text-align: center;
+            cursor: pointer;
+            z-index: 30;
+            text-shadow: 2px 2px 0 #f0f, -2px -2px 0 #0ff;
+        }
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
+        }
+        p.blink {
+            color: #aaa;
+            font-size: 14px;
+            animation: blink 0.8s infinite alternate;
+        }
+        @keyframes blink {
+            from { opacity: 1; }
+            to   { opacity: 0.3; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+    <div class="scanlines"></div>
+
+    <div id="ui">
+        STEPS: <span id="stepsVal">0</span><br>
+        TIME: <span id="timeVal">0.0</span>s
+    </div>
+
+    <div id="start-screen" onclick="startGame()">
+        <h1>CYBER MAZE</h1>
+        <p style="font-size:12px; color:#0ff;">方向键 / WASD 移动（可长按）</p>
+        <p class="blink">[ 点击开始 ]</p>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+const uiSteps = document.getElementById('stepsVal');
+const uiTime  = document.getElementById('timeVal');
+const startScreen = document.getElementById('start-screen');
+
+// ====== 基础参数 ======
+const GAME_WIDTH  = 400;
+const GAME_HEIGHT = 600;
+
+canvas.width  = GAME_WIDTH;
+canvas.height = GAME_HEIGHT;
+
+// 迷宫网格设置（奇数）
+const CELL_SIZE   = 16;      // 一个迷宫格子的像素尺寸
+const COLS        = 25;      // 宽 25 格
+const ROWS        = 35;      // 高 35 格
+const MAZE_TOP    = (GAME_HEIGHT - ROWS * CELL_SIZE) / 2;
+const MAZE_LEFT   = 0;
+
+// 迷宫值
+const WALL = 1;
+const PATH = 0;
+
+// 游戏状态
+let gameState = 'MENU';   // MENU / PLAYING
+let frames    = 0;
+let grid      = [];
+let player    = { x: 1, y: 1 };
+let goal      = { x: COLS - 2, y: ROWS - 2 };
+let steps     = 0;
+let startTime = 0;
+let finishTime = null;
+
+// 键盘输入状态
+const keyState = {
+  ArrowUp: false, ArrowDown: false,
+  ArrowLeft: false, ArrowRight: false,
+  w: false, a: false, s: false, d: false
+};
+
+// 长按移动控制
+let moveHoldDir = null;        // "up" | "down" | "left" | "right" | null
+let moveHoldElapsed = 0;       // 已按住时间（毫秒）
+const INITIAL_HOLD_DELAY = 180; // 第一次延迟
+const HOLD_INTERVAL       = 90; // 持续移动间隔
+
+// 星星背景
+class Star {
+  constructor() {
+    this.reset();
+    this.y = Math.random() * GAME_HEIGHT;
+  }
+  reset() {
+    this.x = Math.random() * GAME_WIDTH;
+    this.y = 0;
+    this.z = Math.random() * 2 + 1;
+    this.speed = this.z * 0.8;
+    this.size = Math.random() > 0.8 ? 2 : 1;
+    const b = Math.floor(this.z * 50 + 80);
+    this.color = `rgb(${b},${b},${b})`;
+  }
+  update() {
+    this.y += this.speed;
+    if (this.y > GAME_HEIGHT) this.reset();
+  }
+  draw() {
+    ctx.fillStyle = this.color;
+    ctx.fillRect(this.x, this.y, this.size, this.size * (this.speed / 2));
+  }
+}
+
+const stars = Array(40).fill(0).map(() => new Star());
+
+// ====== 工具函数 ======
+function createEmptyGrid() {
+  grid = [];
+  for (let y = 0; y < ROWS; y++) {
+    const row = [];
+    for (let x = 0; x < COLS; x++) {
+      row.push(WALL);
+    }
+    grid.push(row);
+  }
+}
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+// 递归回溯生成迷宫
+function generateMaze() {
+  createEmptyGrid();
+
+  function carve(x, y) {
+    grid[y][x] = PATH;
+    const dirs = [
+      {dx:  2, dy:  0},
+      {dx: -2, dy:  0},
+      {dx:  0, dy:  2},
+      {dx:  0, dy: -2}
+    ];
+    shuffle(dirs);
+    for (const d of dirs) {
+      const nx = x + d.dx;
+      const ny = y + d.dy;
+      if (nx > 0 && nx < COLS - 1 &&
+          ny > 0 && ny < ROWS - 1 &&
+          grid[ny][nx] === WALL) {
+        grid[y + d.dy / 2][x + d.dx / 2] = PATH;
+        carve(nx, ny);
+      }
+    }
+  }
+
+  carve(1, 1);
+  grid[1][1] = PATH;
+  grid[goal.y][goal.x] = PATH;
+
+  player.x = 1;
+  player.y = 1;
+  steps = 0;
+  finishTime = null;
+  startTime = performance.now();
+  uiSteps.textContent = steps;
+  uiTime.textContent = '0.0';
+
+  moveHoldDir = null;
+  moveHoldElapsed = 0;
+}
+
+// 完成迷宫
+function finishMaze() {
+  if (gameState !== 'PLAYING') return;
+  gameState = 'MENU';
+  finishTime = performance.now();
+  const used = ((finishTime - startTime) / 1000).toFixed(1);
+  uiTime.textContent = used;
+
+  setTimeout(() => {
+    startScreen.innerHTML = `
+      <h1>MAZE CLEAR</h1>
+      <p style="font-size:12px; color:#0ff;">
+        Steps: ${steps}<br>Time: ${used}s
+      </p>
+      <p class="blink" style="margin-top:20px">[ 点击重新开始 ]</p>
+    `;
+    startScreen.style.display = 'block';
+  }, 300);
+}
+
+// 一次移动一格
+function moveOnce(dir) {
+  let dx = 0, dy = 0;
+
+  if (dir === "up")    dy = -1;
+  if (dir === "down")  dy = 1;
+  if (dir === "left")  dx = -1;
+  if (dir === "right") dx = 1;
+
+  const nx = player.x + dx;
+  const ny = player.y + dy;
+  if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) return;
+  if (grid[ny][nx] === WALL) return;
+
+  player.x = nx;
+  player.y = ny;
+  steps++;
+  uiSteps.textContent = steps;
+
+  if (nx === goal.x && ny === goal.y) {
+    finishMaze();
+  }
+}
+
+// ====== 输入 ======
+window.addEventListener('keydown', (e) => {
+  const k = e.key;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(k)) {
+    e.preventDefault();
+    keyState[k] = true;
+    handleMoveKey(k);
+  } else if (['w','a','s','d','W','A','S','D'].includes(k)) {
+    const low = k.toLowerCase();
+    keyState[low] = true;
+    handleMoveKey(low);
+  }
+
+  if (k === 'r' || k === 'R') {
+    if (gameState !== 'MENU') {
+      generateMaze();
+      gameState = 'PLAYING';
+      startScreen.style.display = 'none';
+    }
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  const k = e.key;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(k)) {
+    keyState[k] = false;
+  } else if (['w','a','s','d','W','A','S','D'].includes(k)) {
+    keyState[k.toLowerCase()] = false;
+  }
+  // 松开键，停止持续移动
+  moveHoldDir = null;
+  moveHoldElapsed = 0;
+});
+
+// 处理一次按键（开始移动 + 记录方向）
+function handleMoveKey(code) {
+  if (gameState !== 'PLAYING') return;
+
+  let dir = null;
+  if (code === 'ArrowUp' || code === 'w') dir = "up";
+  if (code === 'ArrowDown' || code === 's') dir = "down";
+  if (code === 'ArrowLeft' || code === 'a') dir = "left";
+  if (code === 'ArrowRight' || code === 'd') dir = "right";
+  if (!dir) return;
+
+  // 立刻移动一次
+  moveOnce(dir);
+
+  // 记录为当前按住方向
+  moveHoldDir = dir;
+  moveHoldElapsed = 0;
+}
+
+// ====== 渲染 ======
+function drawBackground() {
+  // 霓虹渐变背景
+  const grad = ctx.createLinearGradient(0, 0, 0, GAME_HEIGHT);
+  grad.addColorStop(0,   '#090018');
+  grad.addColorStop(0.5, '#050520');
+  grad.addColorStop(1,   '#020207');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+  // 轻微拖尾层
+  ctx.fillStyle = 'rgba(3,3,8,0.35)';
+  ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+  // 星空
+  stars.forEach(s => s.draw());
+
+  // 背景网格线
+  ctx.globalAlpha = 0.1;
+  ctx.strokeStyle = '#151834';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const gridStep = 16;
+  for (let x = 0; x <= GAME_WIDTH; x += gridStep) {
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, GAME_HEIGHT);
+  }
+  for (let y = 0; y <= GAME_HEIGHT; y += gridStep) {
+    ctx.moveTo(0, y);
+    ctx.lineTo(GAME_WIDTH, y);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function drawMaze() {
+  if (!grid.length) return;
+
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const v = grid[y][x];
+      const px = MAZE_LEFT + x * CELL_SIZE;
+      const py = MAZE_TOP  + y * CELL_SIZE;
+
+      if (v === WALL) {
+        const depth = y / ROWS;
+        const baseR = 40 + depth * 40;
+        const baseG = 30 + depth * 30;
+        const baseB = 80 + depth * 60;
+        ctx.fillStyle = `rgb(${baseR|0},${baseG|0},${baseB|0})`;
+        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.fillRect(px, py + CELL_SIZE - 3, CELL_SIZE, 3);
+      } else {
+        ctx.fillStyle = '#070b18';
+        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+
+        ctx.fillStyle = 'rgba(0,255,255,0.07)';
+        ctx.fillRect(px + 1, py + CELL_SIZE - 2, CELL_SIZE - 2, 1);
+      }
+    }
+  }
+
+  // 终点
+  const gx = MAZE_LEFT + goal.x * CELL_SIZE;
+  const gy = MAZE_TOP  + goal.y * CELL_SIZE;
+  const pulse = 0.5 + 0.5 * Math.sin(frames * 0.1);
+
+  ctx.globalAlpha = 0.6 * pulse;
+  ctx.fillStyle = '#1e90ff';
+  ctx.fillRect(gx - 4, gy - 4, CELL_SIZE + 8, CELL_SIZE + 8);
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#42fdff';
+  ctx.fillRect(gx + 2, gy + 2, CELL_SIZE - 4, CELL_SIZE - 4);
+}
+
+function drawPlayer() {
+  const px = MAZE_LEFT + player.x * CELL_SIZE;
+  const py = MAZE_TOP  + player.y * CELL_SIZE;
+
+  const t = frames * 0.15;
+  const bob = Math.sin(t) * 1.2;
+
+  // 发光圈
+  ctx.globalAlpha = 0.35;
+  ctx.fillStyle = '#00ffbf';
+  ctx.beginPath();
+  ctx.ellipse(px + CELL_SIZE/2, py + CELL_SIZE/2 + 1,
+              CELL_SIZE*0.7, CELL_SIZE*0.4, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // 身体
+  ctx.fillStyle = '#00ffbf';
+  ctx.fillRect(px + 3, py + 3 + bob, CELL_SIZE - 6, CELL_SIZE - 6);
+
+  // 中心高光
+  ctx.fillStyle = '#b8fff7';
+  ctx.fillRect(px + 5, py + 5 + bob, CELL_SIZE - 10, CELL_SIZE - 10);
+}
+
+function drawVignette() {
+  const grad = ctx.createRadialGradient(
+    GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH / 4,
+    GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH
+  );
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.7)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+}
+
+function drawAll() {
+  drawBackground();
+  drawMaze();
+  drawPlayer();
+  drawVignette();
+}
+
+// ====== 更新 ======
+function update(dt) {
+  frames++;
+  stars.forEach(s => s.update());
+
+  if (gameState === 'PLAYING') {
+    const now = performance.now();
+    const elapsed = (now - startTime) / 1000;
+    uiTime.textContent = elapsed.toFixed(1);
+
+    // 长按方向键，自动连续移动
+    if (moveHoldDir) {
+      moveHoldElapsed += dt * 1000; // 转毫秒
+      if (moveHoldElapsed >= INITIAL_HOLD_DELAY) {
+        const over = moveHoldElapsed - INITIAL_HOLD_DELAY;
+        const n = Math.floor(over / HOLD_INTERVAL);
+        if (n > 0) {
+          for (let i = 0; i < n; i++) {
+            moveOnce(moveHoldDir);
+            if (gameState !== 'PLAYING') break;
+          }
+          moveHoldElapsed = INITIAL_HOLD_DELAY + (over % HOLD_INTERVAL);
+        }
+      }
+    }
+  }
+}
+
+// ====== 游戏控制 ======
+function startGame() {
+  generateMaze();
+  gameState = 'PLAYING';
+  startScreen.style.display = 'none';
+}
+
+let lastTime = 0;
+function gameLoop(ts) {
+  if (!lastTime) lastTime = ts;
+  let dt = (ts - lastTime) / 1000;
+  if (dt > 0.05) dt = 0.05;
+  lastTime = ts;
+
+  update(dt);
+  ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+  drawAll();
+
+  requestAnimationFrame(gameLoop);
+}
+
+// 初始：先生成一次迷宫并绘制
+generateMaze();
+drawAll();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>

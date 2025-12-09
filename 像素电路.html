@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Cyber Circuit Puzzle</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background-color: #020205;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: "Courier New", Courier, monospace;
+    }
+    #game-container {
+      position: relative;
+      width: 400px;
+      height: 600px;
+      box-shadow: 0 0 30px rgba(0, 255, 255, 0.3),
+                  0 0 10px rgba(255, 0, 255, 0.3);
+      border: 2px solid #333;
+    }
+    canvas {
+      display: block;
+      background-color: #050510;
+      image-rendering: pixelated;
+      width: 100%;
+      height: 100%;
+    }
+    .scanlines {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(
+        to bottom,
+        rgba(255, 255, 255, 0) 50%,
+        rgba(0, 0, 0, 0.2) 50%
+      );
+      background-size: 100% 4px;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #ui {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: #0ff;
+      font-size: 14px;
+      text-shadow: 1px 1px 0 #f0f;
+      pointer-events: none;
+      z-index: 20;
+      line-height: 1.4;
+    }
+    #start-screen {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      text-align: center;
+      cursor: pointer;
+      z-index: 30;
+      text-shadow: 2px 2px 0 #f0f, -2px -2px 0 #0ff;
+    }
+    h1 {
+      font-size: 28px;
+      margin-bottom: 8px;
+      letter-spacing: 2px;
+    }
+    p.blink {
+      color: #aaa;
+      font-size: 14px;
+      animation: blink 0.8s infinite alternate;
+    }
+    @keyframes blink {
+      from { opacity: 1; }
+      to   { opacity: 0.3; }
+    }
+  </style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="gameCanvas"></canvas>
+  <div class="scanlines"></div>
+
+  <div id="ui">
+    LEVEL: <span id="levelVal">1</span><br />
+    MOVES: <span id="movesVal">0</span><br />
+    TIME: <span id="timeVal">0.0</span>s
+  </div>
+
+  <div id="start-screen" onclick="startGame()">
+    <h1>CYBER CIRCUIT</h1>
+    <p id="start-level-label" style="font-size: 12px; color: #0ff; margin-bottom:4px;">
+      LEVEL 1
+    </p>
+    <p style="font-size: 12px; color: #0ff;">
+      点击旋转电路块<br />让电流从左侧入口接到右侧出口
+    </p>
+    <p class="blink">[ 点击开始 ]</p>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+const uiMoves  = document.getElementById("movesVal");
+const uiTime   = document.getElementById("timeVal");
+const uiLevel  = document.getElementById("levelVal");
+const startScreen = document.getElementById("start-screen");
+let startLevelLabel = document.getElementById("start-level-label");
+
+// ===== 基础画布参数 =====
+const GAME_WIDTH  = 400;
+const GAME_HEIGHT = 600;
+canvas.width  = GAME_WIDTH;
+canvas.height = GAME_HEIGHT;
+
+// ===== 网格 / 电路板参数 =====
+const GRID_COLS = 10;
+const GRID_ROWS = 10;
+const TILE_SIZE = 32;
+
+const GRID_WIDTH  = GRID_COLS * TILE_SIZE;
+const GRID_HEIGHT = GRID_ROWS * TILE_SIZE;
+const GRID_LEFT   = (GAME_WIDTH  - GRID_WIDTH)  / 2;
+const GRID_TOP    = (GAME_HEIGHT - GRID_HEIGHT) / 2;
+
+// 方向：0上 1右 2下 3左，对应位掩码 1,2,4,8
+const DIRS = [
+  {dx: 0, dy: -1}, // up
+  {dx: 1, dy:  0}, // right
+  {dx: 0, dy:  1}, // down
+  {dx:-1, dy:  0}  // left
+];
+const OPP = [2, 3, 0, 1];
+
+// 每格：baseMask, rotation(0-3，用于逻辑), visualAngle(渲染角度), targetAngle, isPath, isStart, isEnd
+let tiles = [];
+let startCell = {x: 0, y: 0};
+let endCell   = {x: GRID_COLS-1, y: GRID_ROWS-1};
+
+// 当前从起点能“通电”的格子标记
+let connectedMap = [];
+
+// 状态
+let gameState = "MENU"; // MENU / PLAYING
+let frames = 0;
+let moves  = 0;
+let startTime = 0;
+let finishTime = null;
+
+// 难度（1~6）
+let difficulty = 1;
+const MAX_DIFFICULTY = 6;
+
+// ===== 星空背景 =====
+class Star {
+  constructor() {
+    this.reset();
+    this.y = Math.random() * GAME_HEIGHT;
+  }
+  reset() {
+    this.x = Math.random() * GAME_WIDTH;
+    this.y = 0;
+    this.z = Math.random() * 2 + 1;
+    this.speed = this.z * 0.4;
+    this.size = Math.random() > 0.8 ? 2 : 1;
+    const b = Math.floor(this.z * 50 + 80);
+    this.color = `rgb(${b},${b},${b})`;
+  }
+  update() {
+    this.y += this.speed;
+    if (this.y > GAME_HEIGHT) this.reset();
+  }
+  draw() {
+    ctx.fillStyle = this.color;
+    ctx.fillRect(this.x, this.y, this.size, this.size * (this.speed / 2));
+  }
+}
+const stars = Array(35).fill(0).map(() => new Star());
+
+// ===== 工具函数 =====
+function rotateMask(mask, rot) {
+  if (rot === 0) return mask;
+  let res = 0;
+  for (let i = 0; i < 4; i++) {
+    if (mask & (1 << i)) {
+      const ni = (i + rot) % 4;
+      res |= (1 << ni);
+    }
+  }
+  return res;
+}
+
+function createEmptyTiles() {
+  tiles = [];
+  connectedMap = [];
+  for (let y = 0; y < GRID_ROWS; y++) {
+    const row = [];
+    const crow = [];
+    for (let x = 0; x < GRID_COLS; x++) {
+      row.push({
+        baseMask: 0,
+        rotation: 0,
+        visualAngle: 0,  // 实际渲染角度（弧度）
+        targetAngle: 0,  // 目标角度
+        isPath: false,
+        isStart: false,
+        isEnd: false
+      });
+      crow.push(false);
+    }
+    tiles.push(row);
+    connectedMap.push(crow);
+  }
+}
+
+// 生成从左到右的一条非分叉路径
+function generatePathCells(level) {
+  let attempts = 0;
+  const rightBias = Math.max(0.45, 0.85 - (level - 1) * 0.08); // 难度越高，越容易上下绕
+
+  while (attempts < 80) {
+    attempts++;
+    const visited = [];
+    for (let y = 0; y < GRID_ROWS; y++) {
+      visited[y] = [];
+      for (let x = 0; x < GRID_COLS; x++) visited[y][x] = false;
+    }
+
+    const startY = 1 + (Math.random() * (GRID_ROWS - 2)) | 0;
+    let x = 0;
+    let y = startY;
+    const cells = [{x, y}];
+    visited[y][x] = true;
+
+    while (x < GRID_COLS - 1) {
+      const candidates = [];
+      const tryDirs = [
+        {dx: 1, dy: 0},  // right
+        {dx: 0, dy:-1},  // up
+        {dx: 0, dy: 1}   // down
+      ];
+
+      for (const d of tryDirs) {
+        const nx = x + d.dx;
+        const ny = y + d.dy;
+        if (nx < 0 || nx >= GRID_COLS || ny < 0 || ny >= GRID_ROWS) continue;
+        if (ny === 0 || ny === GRID_ROWS - 1) continue;
+        if (!visited[ny][nx]) candidates.push({dx: d.dx, dy: d.dy});
+      }
+
+      if (!candidates.length) break;
+
+      let dir;
+      const rightIdx = candidates.findIndex(c => c.dx === 1 && c.dy === 0);
+      if (rightIdx !== -1 && Math.random() < rightBias) {
+        dir = candidates[rightIdx];
+      } else {
+        dir = candidates[(Math.random() * candidates.length) | 0];
+      }
+
+      x += dir.dx;
+      y += dir.dy;
+      visited[y][x] = true;
+      cells.push({x, y});
+    }
+
+    if (x === GRID_COLS - 1) {
+      return cells;
+    }
+  }
+
+  const fallback = [];
+  const midY = (GRID_ROWS / 2) | 0;
+  for (let x = 0; x < GRID_COLS; x++) {
+    fallback.push({x, y: midY});
+  }
+  return fallback;
+}
+
+// 根据路径生成 baseMask，并为其它格子填充随机电路块
+function applyPathToTiles(pathCells, level) {
+  createEmptyTiles();
+
+  // 给路径格子设置 mask
+  for (let i = 0; i < pathCells.length; i++) {
+    const cell = pathCells[i];
+    const x = cell.x, y = cell.y;
+    let mask = 0;
+
+    const prev = i > 0 ? pathCells[i - 1] : null;
+    const next = i < pathCells.length - 1 ? pathCells[i + 1] : null;
+
+    function dirFromTo(ax, ay, bx, by) {
+      if (bx === ax && by === ay - 1) return 0;
+      if (bx === ax + 1 && by === ay) return 1;
+      if (bx === ax && by === ay + 1) return 2;
+      if (bx === ax - 1 && by === ay) return 3;
+      return null;
+    }
+
+    if (prev) {
+      const d = dirFromTo(x, y, prev.x, prev.y);
+      if (d !== null) mask |= (1 << d);
+    }
+    if (next) {
+      const d = dirFromTo(x, y, next.x, next.y);
+      if (d !== null) mask |= (1 << d);
+    }
+
+    const t = tiles[y][x];
+    t.baseMask = mask;
+    t.rotation = 0;
+    t.visualAngle = 0;
+    t.targetAngle = 0;
+    t.isPath = true;
+  }
+
+  // 起点终点
+  const first = pathCells[0];
+  const last  = pathCells[pathCells.length - 1];
+  tiles[first.y][first.x].isStart = true;
+  tiles[last.y][last.x].isEnd   = true;
+  startCell = {x: first.x, y: first.y};
+  endCell   = {x: last.x,  y: last.y};
+
+  // 电路块形状库
+  const SHAPES_BASE = [
+    0b0101, // 上下
+    0b1010, // 左右
+    0b0011, // 上-右
+    0b0110, // 右-下
+    0b1100, // 下-左
+    0b1001  // 左-上
+  ];
+  const SHAPES_T = [
+    0b0111, // 上右下
+    0b1110, // 右下左
+    0b1101, // 下左上
+    0b1011  // 左上右
+  ];
+  const SHAPES_CROSS = [0b1111];
+
+  let SHAPES = SHAPES_BASE.slice();
+  if (level >= 2) SHAPES = SHAPES.concat(SHAPES_T);
+  if (level >= 4) SHAPES = SHAPES.concat(SHAPES_CROSS);
+
+  // 填充非路径格子
+  for (let y = 0; y < GRID_ROWS; y++) {
+    for (let x = 0; x < GRID_COLS; x++) {
+      const t = tiles[y][x];
+      if (t.baseMask === 0) {
+        const shapeMask = SHAPES[(Math.random() * SHAPES.length) | 0];
+        const r = (Math.random() * 4) | 0;
+        t.baseMask = shapeMask;
+        t.rotation = r;
+        t.targetAngle = r * (Math.PI / 2);
+        t.visualAngle = t.targetAngle;
+      }
+    }
+  }
+
+  // 打乱路径格子的朝向
+  for (const cell of pathCells) {
+    const t = tiles[cell.y][cell.x];
+    const r = (Math.random() * 4) | 0;
+    t.rotation = r;
+    t.targetAngle = r * (Math.PI / 2);
+    t.visualAngle = t.targetAngle;
+  }
+}
+
+// 计算当前从 startCell 能“通电”的所有格子，并返回是否连到 endCell
+function computeConnectivity() {
+  for (let y = 0; y < GRID_ROWS; y++) {
+    for (let x = 0; x < GRID_COLS; x++) {
+      connectedMap[y][x] = false;
+    }
+  }
+
+  const sx = startCell.x;
+  const sy = startCell.y;
+  const q = [];
+  connectedMap[sy][sx] = true;
+  q.push({x: sx, y: sy});
+
+  while (q.length) {
+    const {x, y} = q.shift();
+    const tile = tiles[y][x];
+    const currMask = rotateMask(tile.baseMask, tile.rotation);
+    if (!currMask) continue;
+
+    for (let dir = 0; dir < 4; dir++) {
+      if (!(currMask & (1 << dir))) continue;
+      const nx = x + DIRS[dir].dx;
+      const ny = y + DIRS[dir].dy;
+      if (nx < 0 || nx >= GRID_COLS || ny < 0 || ny >= GRID_ROWS) continue;
+
+      const neighbor = tiles[ny][nx];
+      const nMask = rotateMask(neighbor.baseMask, neighbor.rotation);
+      const opp = OPP[dir];
+      if (!(nMask & (1 << opp))) continue;
+
+      if (!connectedMap[ny][nx]) {
+        connectedMap[ny][nx] = true;
+        q.push({x: nx, y: ny});
+      }
+    }
+  }
+
+  return connectedMap[endCell.y][endCell.x];
+}
+
+// ===== 输入：点击旋转格子 =====
+canvas.addEventListener("click", (e) => {
+  if (gameState !== "PLAYING") return;
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const mx = (e.clientX - rect.left) * scaleX;
+  const my = (e.clientY - rect.top) * scaleY;
+
+  const gx = mx - GRID_LEFT;
+  const gy = my - GRID_TOP;
+  if (gx < 0 || gy < 0 || gx >= GRID_WIDTH || gy >= GRID_HEIGHT) return;
+
+  const tx = (gx / TILE_SIZE) | 0;
+  const ty = (gy / TILE_SIZE) | 0;
+
+  const tile = tiles[ty][tx];
+  if (!tile.baseMask) return;
+
+  // 逻辑旋转：一步 90°
+  tile.rotation = (tile.rotation + 1) % 4;
+
+  // 动画目标：从当前 visualAngle 再顺时针 +90°
+  tile.targetAngle = tile.visualAngle + (Math.PI / 2);
+
+  moves++;
+  uiMoves.textContent = moves;
+
+  const solved = computeConnectivity();  // 重新计算通电路径
+
+  if (solved) {
+    gameState = "MENU";
+    finishTime = performance.now();
+    const used = ((finishTime - startTime) / 1000).toFixed(1);
+    uiTime.textContent = used;
+
+    // 通关提升难度
+    const prevLevel = difficulty;
+    difficulty = Math.min(MAX_DIFFICULTY, difficulty + 1);
+    uiLevel.textContent = difficulty;
+
+    setTimeout(() => {
+      startScreen.innerHTML = `
+        <h1>CIRCUIT OK</h1>
+        <p style="font-size:12px; color:#0ff; margin:4px 0;">
+          Level: ${prevLevel} → ${difficulty}<br>
+          Moves: ${moves}<br>Time: ${used}s
+        </p>
+        <p class="blink" style="margin-top:10px">[ 点击下一关 ]</p>
+      `;
+      startScreen.style.display = "block";
+    }, 300);
+  }
+});
+
+// ===== 绘制 =====
+function drawBackground() {
+  const grad = ctx.createLinearGradient(0, 0, 0, GAME_HEIGHT);
+  grad.addColorStop(0,   "#090018");
+  grad.addColorStop(0.5, "#050520");
+  grad.addColorStop(1,   "#020207");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+  ctx.fillStyle = "rgba(3,3,8,0.35)";
+  ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+  stars.forEach(s => s.draw());
+
+  ctx.globalAlpha = 0.1;
+  ctx.strokeStyle = "#151834";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const step = 16;
+  for (let x = 0; x <= GAME_WIDTH; x += step) {
+    ctx.moveTo(x, 0); ctx.lineTo(x, GAME_HEIGHT);
+  }
+  for (let y = 0; y <= GAME_HEIGHT; y += step) {
+    ctx.moveTo(0, y); ctx.lineTo(GAME_WIDTH, y);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+// 更像 PCB 的电线样式：用矩形模拟铜线轨道 + 旋转动画
+function drawTile(x, y, tile) {
+  const px = GRID_LEFT + x * TILE_SIZE;
+  const py = GRID_TOP  + y * TILE_SIZE;
+
+  // 背板 & 边框 不旋转，保持对齐
+  ctx.fillStyle = "#050910";
+  ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+
+  ctx.strokeStyle = "rgba(0,255,255,0.12)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(px + 0.5, py + 0.5, TILE_SIZE - 1, TILE_SIZE - 1);
+
+  const baseMask = tile.baseMask;
+  if (!baseMask) return;
+
+  const cx = px + TILE_SIZE / 2;
+  const cy = py + TILE_SIZE / 2;
+
+  const isConnected = connectedMap[y] && connectedMap[y][x];
+  const trackColorBase   = "#00ffd5";
+  const trackColorActive = "#8dff70";
+  const trackColor = isConnected ? trackColorActive : trackColorBase;
+
+  const trackWidthOuter = 8;
+  const trackWidthInner = 4;
+  const half = TILE_SIZE / 2;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  const angle = tile.visualAngle || 0;
+  ctx.rotate(angle);
+
+  // 外层轨道
+  ctx.fillStyle = isConnected ? "rgba(90, 180, 90, 0.9)" : "rgba(0, 160, 140, 0.9)";
+
+  // 使用局部坐标 (-half ~ +half)
+  if (baseMask & 0b0001) { // 上
+    ctx.fillRect(
+      -trackWidthOuter/2,
+      -half + 2,
+      trackWidthOuter,
+      half - 2
+    );
+  }
+  if (baseMask & 0b0010) { // 右
+    ctx.fillRect(
+      0,
+      -trackWidthOuter/2,
+      half - 2,
+      trackWidthOuter
+    );
+  }
+  if (baseMask & 0b0100) { // 下
+    ctx.fillRect(
+      -trackWidthOuter/2,
+      0,
+      trackWidthOuter,
+      half - 2
+    );
+  }
+  if (baseMask & 0b1000) { // 左
+    ctx.fillRect(
+      -half + 2,
+      -trackWidthOuter/2,
+      half - 2,
+      trackWidthOuter
+    );
+  }
+
+  // 中心块（外层）
+  ctx.fillRect(
+    -trackWidthOuter/2,
+    -trackWidthOuter/2,
+    trackWidthOuter,
+    trackWidthOuter
+  );
+
+  // 内层更亮线路芯
+  ctx.fillStyle = trackColor;
+  if (baseMask & 0b0001) { // 上
+    ctx.fillRect(
+      -trackWidthInner/2,
+      -half + 4,
+      trackWidthInner,
+      half - 4
+    );
+  }
+  if (baseMask & 0b0010) { // 右
+    ctx.fillRect(
+      2,
+      -trackWidthInner/2,
+      half - 4,
+      trackWidthInner
+    );
+  }
+  if (baseMask & 0b0100) { // 下
+    ctx.fillRect(
+      -trackWidthInner/2,
+      2,
+      trackWidthInner,
+      half - 4
+    );
+  }
+  if (baseMask & 0b1000) { // 左
+    ctx.fillRect(
+      -half + 4,
+      -trackWidthInner/2,
+      half - 4,
+      trackWidthInner
+    );
+  }
+
+  // 中心小芯片
+  let coreColor;
+  if (tile.isStart) {
+    coreColor = isConnected ? "#fff37a" : "#fffa7a";
+  } else if (tile.isEnd) {
+    coreColor = isConnected ? "#a2ffff" : "#7affff";
+  } else {
+    coreColor = isConnected ? "#f0ffe0" : "#b0fff4";
+  }
+
+  ctx.fillStyle = coreColor;
+  ctx.fillRect(
+    -trackWidthInner/2,
+    -trackWidthInner/2,
+    trackWidthInner,
+    trackWidthInner
+  );
+
+  // 通电影响：发光和轻微闪烁
+  const pulse = isConnected
+    ? (0.5 + 0.4 * Math.sin(frames * 0.18 + x + y))
+    : 0.16;
+
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = isConnected
+    ? "rgba(180,255,160,0.75)"
+    : "rgba(0,255,255,0.25)";
+  ctx.fillRect(
+    -half + 2,
+    -half + 2,
+    TILE_SIZE - 4,
+    TILE_SIZE - 4
+  );
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+}
+
+function drawGrid() {
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.fillRect(GRID_LEFT - 6, GRID_TOP - 6,
+               GRID_WIDTH + 12, GRID_HEIGHT + 12);
+
+  ctx.strokeStyle = "rgba(0,255,255,0.3)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(GRID_LEFT - 6, GRID_TOP - 6,
+                 GRID_WIDTH + 12, GRID_HEIGHT + 12);
+
+  for (let y = 0; y < GRID_ROWS; y++) {
+    for (let x = 0; x < GRID_COLS; x++) {
+      drawTile(x, y, tiles[y][x]);
+    }
+  }
+
+  const sy = GRID_TOP + startCell.y * TILE_SIZE + TILE_SIZE / 2;
+  const ey = GRID_TOP + endCell.y   * TILE_SIZE + TILE_SIZE / 2;
+
+  ctx.fillStyle = "#ffe45a";
+  ctx.font = "10px monospace";
+  ctx.textAlign = "right";
+  ctx.fillText("IN", GRID_LEFT - 10, sy + 3);
+
+  ctx.fillStyle = "#5aefff";
+  ctx.textAlign = "left";
+  ctx.fillText("OUT", GRID_LEFT + GRID_WIDTH + 10, ey + 3);
+}
+
+function drawVignette() {
+  const grad = ctx.createRadialGradient(
+    GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH / 4,
+    GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH
+  );
+  grad.addColorStop(0, "rgba(0,0,0,0)");
+  grad.addColorStop(1, "rgba(0,0,0,0.7)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+}
+
+function drawAll() {
+  drawBackground();
+  drawGrid();
+  drawVignette();
+}
+
+// ===== 更新 =====
+function update(dt) {
+  frames++;
+  stars.forEach(s => s.update());
+
+  // 旋转动画：visualAngle 向 targetAngle 插值
+  const ROTATE_SPEED = 16; // 越大越快（类似每秒插值 16 次）
+  for (let y = 0; y < GRID_ROWS; y++) {
+    for (let x = 0; x < GRID_COLS; x++) {
+      const t = tiles[y][x];
+      const diff = t.targetAngle - t.visualAngle;
+      if (Math.abs(diff) > 0.001) {
+        const step = diff * Math.min(1, dt * ROTATE_SPEED);
+        t.visualAngle += step;
+      } else {
+        t.visualAngle = t.targetAngle;
+      }
+    }
+  }
+
+  if (gameState === "PLAYING") {
+    const now = performance.now();
+    const elapsed = (now - startTime) / 1000;
+    uiTime.textContent = elapsed.toFixed(1);
+  }
+}
+
+// ===== 游戏控制 =====
+function startGame() {
+  // 恢复开始界面的文字结构（因为通关时 innerHTML 被改过）
+  startScreen.innerHTML = `
+    <h1>CYBER CIRCUIT</h1>
+    <p id="start-level-label" style="font-size: 12px; color: #0ff; margin-bottom:4px;">
+      LEVEL ${difficulty}
+    </p>
+    <p style="font-size: 12px; color: #0ff;">
+      点击旋转电路块<br />让电流从左侧入口接到右侧出口
+    </p>
+    <p class="blink">[ 点击开始 ]</p>
+  `;
+  startLevelLabel = document.getElementById("start-level-label");
+  if (startLevelLabel) {
+    startLevelLabel.textContent = `LEVEL ${difficulty}`;
+  }
+
+  uiLevel.textContent = difficulty;
+
+  const pathCells = generatePathCells(difficulty);
+  applyPathToTiles(pathCells, difficulty);
+  moves = 0;
+  uiMoves.textContent = moves;
+  startTime = performance.now();
+  gameState = "PLAYING";
+  startScreen.style.display = "none";
+
+  computeConnectivity();
+}
+
+let lastTime = 0;
+function gameLoop(ts) {
+  if (!lastTime) lastTime = ts;
+  let dt = (ts - lastTime) / 1000;
+  if (dt > 0.05) dt = 0.05;
+  lastTime = ts;
+
+  update(dt);
+  ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+  drawAll();
+
+  requestAnimationFrame(gameLoop);
+}
+
+// 初始：画一帧空电路板
+createEmptyTiles();
+drawAll();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
